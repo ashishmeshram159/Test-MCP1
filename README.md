@@ -4,27 +4,19 @@ Testing MCP for **puch.AI**
 ---
 
 ## **Directory Structure**
-
+```plaintext
 Test-MCP1
-├───mcp_starter
-│   ├───mcp-bearer-token
-│   ├───mcp-google-oauth
-│   │   └───src
-│   └───mcp-oauth-github
-│       └───src
-└───simple_server
-
+├── mcp_starter
+│   ├── mcp-bearer-token
+└── simple_server
 ---
 
 ## **Description**
 
 ### **1. `mcp_starter/`**  
-Contains **puch.AI sample MCP code** with examples for:  
+Contains **puch.AI sample MCP code** with example for:  
 - Bearer Token Authentication  
-- Google OAuth Integration  
-- GitHub OAuth Integration  
-
-📄 Includes a README with **full setup instructions** for running these examples.  
+📄 Includes a README with **full setup instructions** for running this example.  
 
 ---
 
