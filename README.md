@@ -9,6 +9,7 @@ Test-MCP1
 ├── mcp_starter
 │   ├── mcp-bearer-token
 └── simple_server
+```
 ---
 
 ## **Description**
