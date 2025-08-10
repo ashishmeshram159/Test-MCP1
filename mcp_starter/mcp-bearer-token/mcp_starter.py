@@ -17,6 +17,46 @@ import readabilipy
 import json
 import math
 
+
+import sqlite3
+from datetime import date
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
+import random
+
+DB_PATH = "diet_tracking2.db"
+
+# --- DB Setup ---
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            height_cm REAL,
+            weight_kg REAL,
+            bmi REAL,
+            suggested_calories_per_day INTEGER
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS diet_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            food_item TEXT NOT NULL,
+            portion TEXT NOT NULL,
+            calories INTEGER NOT NULL,
+            entry_date TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+
 # --- Load environment variables ---
 load_dotenv()
 
@@ -280,6 +320,191 @@ def cheat_meal_assist(meal, weight_kg):
     return {"calories": calories, "Activity_list_to_burn_calories": suggestions}
 
 
+#--------------------------------START---------------------------------
+
+# --- BMI Calculation Helper ---
+def compute_bmi_and_calories(weight_kg: float, height_cm: float) -> dict:
+    height_m = height_cm / 100
+    bmi = round(weight_kg / (height_m ** 2), 2)
+
+    # Very basic calorie recommendation (can be improved)
+    if bmi < 18.5:
+        suggested = 2500
+    elif bmi < 25:
+        suggested = 2000
+    else:
+        suggested = 1600
+
+    return {
+        "bmi": bmi,
+        "suggested_calories_per_day": suggested
+    }
+
+# --- LangChain OpenAI Calorie Estimator ---
+def estimate_calories(food_item: str, portion: str) -> int:
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    prompt = PromptTemplate.from_template(
+        "Estimate the calories for {food_item} weighing {portion}. "
+        "Only return a number in kcal without any units or words."
+    )
+    chain = prompt | llm
+    try:
+        result = chain.invoke({"food_item": food_item, "portion": portion})
+        return int(result.content.strip())
+    except Exception:
+        return random.randint(200, 2000)
+
+# --- Reward Logic ---
+def get_reward_message(bmi: float, suggested_calories: int, total_calories: int, name: str) -> str:
+    if bmi < 18.5:  # Underweight
+        if total_calories > suggested_calories:
+            return f"💪 Great job, {name}! You’re eating enough to gain healthy weight."
+        else:
+            return f"🚶 {name}, try eating a bit more today for healthy weight gain."
+    elif bmi >= 25:  # Overweight
+        if total_calories < suggested_calories:
+            return f"🔥 Excellent, {name}! You stayed under your target for weight loss."
+        else:
+            return f"🚶 {name}, a light walk might help balance today’s intake."
+    else:  # Normal
+        if total_calories == suggested_calories:
+            return f"🎯 Perfect, {name}! You nailed your calorie goal exactly."
+        else:
+            return f"🚶 {name}, consider a walk to balance today’s intake."
+
+# --- Main Tool ---
+
+@mcp.tool()
+async def log_diet_and_check_goal(
+    user_id: str,
+    food_item: str,
+    portion: str,
+    calories: int = None,
+    name: str = None,
+    height_cm: float = None,
+    weight_kg: float = None
+) -> dict:
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Check if user exists
+    cur.execute("SELECT height_cm, weight_kg, bmi, suggested_calories_per_day, name FROM users WHERE user_id = ?", (user_id,))
+    user_info = cur.fetchone()
+
+    if not user_info:
+        if height_cm is None or weight_kg is None:
+            conn.close()
+            return {"error": "New user detected. Please provide height_cm and weight_kg."}
+
+        bmi_data = compute_bmi_and_calories(weight_kg, height_cm)
+        cur.execute("""
+            INSERT INTO users (user_id, name, height_cm, weight_kg, bmi, suggested_calories_per_day)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, name, height_cm, weight_kg,
+            bmi_data["bmi"], bmi_data["suggested_calories_per_day"]
+        ))
+        conn.commit()
+        daily_calorie_goal = bmi_data["suggested_calories_per_day"]
+
+    else:
+        height_cm, weight_kg, bmi_val, daily_calorie_goal, existing_name = user_info
+        name = name or existing_name
+        bmi_data = {"bmi": bmi_val, "suggested_calories_per_day": daily_calorie_goal}
+
+    # If calories not given, estimate them
+    if calories is None:
+        calories = estimate_calories(food_item, portion)
+
+    # Log food
+    today_str = date.today().isoformat()
+    cur.execute("""
+        INSERT INTO diet_log (user_id, food_item, portion, calories, entry_date)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, food_item, portion, calories, today_str))
+    conn.commit()
+
+    # Calculate total for the day
+    cur.execute("""
+        SELECT SUM(calories) FROM diet_log
+        WHERE user_id = ? AND entry_date = ?
+    """, (user_id, today_str))
+    total_calories = cur.fetchone()[0] or 0
+    conn.close()
+
+    return {
+        "date": today_str,
+        "user_bmi_info": bmi_data,
+        "food_logged": {
+            "food_item": food_item,
+            "portion": portion,
+            "calories": calories
+        },
+        "total_calories_today": total_calories,
+        "goal": daily_calorie_goal
+    }
+
+
+
+@mcp.tool()
+async def reward_or_recommendation(
+    user_id: str,
+    analysis_date: str = None
+) -> dict:
+    """
+    Checks if the user met their calorie goal and returns a reward or recommendation.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Get user info
+    cur.execute("SELECT name, bmi, suggested_calories_per_day FROM users WHERE user_id = ?", (user_id,))
+    user_info = cur.fetchone()
+    if not user_info:
+        conn.close()
+        return {"error": "User not found."}
+
+    name, bmi, suggested_calories = user_info
+
+    # Use today's date if not provided
+    if analysis_date is None:
+        analysis_date = date.today().isoformat()
+
+    # Get total calories for that date
+    cur.execute("""
+        SELECT SUM(calories) FROM diet_log
+        WHERE user_id = ? AND entry_date = ?
+    """, (user_id, analysis_date))
+    total_calories = cur.fetchone()[0] or 0
+    conn.close()
+
+    # Reward logic
+    reward_message = get_reward_message(bmi, suggested_calories, total_calories, name)
+
+    if "🚶" in reward_message:
+        # If not meeting goal, give a specific recommendation
+        if bmi < 18.5 and total_calories < suggested_calories:
+            recommendation = "Eat more today to support healthy weight gain."
+        elif bmi >= 25 and total_calories > suggested_calories:
+            recommendation = "Eat less today to help with weight loss."
+        else:
+            recommendation = "Go for a walk or do some light exercise."
+        return {
+            "date": analysis_date,
+            "goal_met": False,
+            "recommendation": recommendation
+        }
+    else:
+        # Goal met → reward
+        return {
+            "date": analysis_date,
+            "goal_met": True,
+            "reward_message": reward_message
+        }
+
+
+#-------------------------------------END------------------------------
 
 # Image inputs and sending images
 
