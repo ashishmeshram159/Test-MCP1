@@ -208,7 +208,6 @@ async def bmi_calorie_limit(weight_kg: float, height_cm: float) -> Dict[str, flo
     return compute_bmi_and_calories(weight_kg, height_cm)
 
 
-
 def estimate_exercise_durations(calories, weight_kg):
     """
     Estimate the duration of various exercises required to burn a given number of calories.
