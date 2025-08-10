@@ -1,11 +1,11 @@
-# **Test-MCP1**  
-Testing MCP for **puch.AI**  
+# **HealthMate**  
+Healthmate is an AI-powered personal health assistant designed to provide tailored health suggestions, track wellness metrics, and support long-term health maintenance, built using the MCP framework for the  **puch.AI**  hackathon.
 
 ---
 
 ## **Directory Structure**
 ```plaintext
-Test-MCP1
+HealthMate
 ├── mcp_starter
 │   ├── mcp-bearer-token
 └── simple_server
@@ -15,7 +15,7 @@ Test-MCP1
 ## **Description**
 
 ### **1. `mcp_starter/`**  
-Contains **puch.AI sample MCP code** with example for:  
+Contains **puch.AI MCP code** with example for:  
 - Bearer Token Authentication  
 📄 Includes a README with **full setup instructions** for running this example.  
 
