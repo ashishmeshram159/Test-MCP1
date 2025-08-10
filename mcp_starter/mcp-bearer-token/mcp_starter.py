@@ -9,11 +9,11 @@ from mcp.server.auth.provider import AccessToken
 from mcp.types import TextContent, ImageContent, INVALID_PARAMS, INTERNAL_ERROR
 from pydantic import BaseModel, Field, AnyUrl
 from typing import Any, Dict, List, Optional
-
+from ddgs import DDGS
+import re
 import markdownify
 import httpx
 import readabilipy
-
 import json
 import math
 
@@ -23,6 +23,15 @@ load_dotenv()
 TOKEN = os.environ.get("AUTH_TOKEN")
 MY_NUMBER = os.environ.get("MY_NUMBER")
 USER_AGENT = "Mozilla/5.0 (compatible; HealthBot/1.0; +https://example.com/bot)"
+
+# MET values for various exercises (approximate)
+EXERCISE_MET = {
+    "walking (3 mph)": 3.5,
+    "jogging (5 mph)": 7.0,
+    "cycling (moderate)": 6.8,
+    "running": 9.0,
+    "jump rope": 10.0
+}
 
 assert TOKEN is not None, "Please set AUTH_TOKEN in your .env file"
 assert MY_NUMBER is not None, "Please set MY_NUMBER in your .env file"
@@ -199,319 +208,78 @@ async def bmi_calorie_limit(weight_kg: float, height_cm: float) -> Dict[str, flo
     return compute_bmi_and_calories(weight_kg, height_cm)
 
 
-# # ---------- helpers ----------
-# def compute_bmi_category(weight_kg: float, height_cm: float) -> Dict[str, Any]:
-#     if height_cm <= 0 or weight_kg <= 0:
-#         return {"error": "Height/weight must be positive."}
-#     h = height_cm / 100.0
-#     bmi = round(weight_kg / (h * h), 2)
-#     if bmi < 18.5:
-#         cat = "Underweight"
-#     elif bmi < 25:
-#         cat = "Normal weight"
-#     elif bmi < 30:
-#         cat = "Overweight"
-#     else:
-#         cat = "Obesity"
-#     return {"bmi": bmi, "category": cat}
 
-# def mifflin_st_jeor(weight_kg: float, height_cm: float, age: int, sex: str) -> float:
-#     if sex.lower().startswith("m"):
-#         return 10 * weight_kg + 6.25 * height_cm - 5 * age + 5
-#     return 10 * weight_kg + 6.25 * height_cm - 5 * age - 161
+def estimate_exercise_durations(calories, weight_kg):
+    """
+    Estimate the duration of various exercises required to burn a given number of calories.
 
-# ACTIVITY = {
-#     "sedentary": 1.2,
-#     "light": 1.375,
-#     "moderate": 1.55,
-#     "active": 1.725,
-#     "very_active": 1.9,
-# }
+    Formula:
+        Calories burned per minute = (MET × weight_kg × 3.5) / 200
 
-# async def call_llm_chat(
-#     messages: List[Dict[str, str]],
-#     model: str,
-#     api_base: str,
-#     api_key: str,
-#     temperature: float = 0.2,
-#     timeout: int = 60,
-# ) -> str:
-#     async with httpx.AsyncClient(timeout=timeout) as client:
-#         r = await client.post(
-#             api_base,
-#             headers={
-#                 "Authorization": f"Bearer {api_key}",
-#                 "Content-Type": "application/json",
-#                 "User-Agent": "HealthMCP/1.0",
-#             },
-#             json={"model": model, "temperature": temperature, "messages": messages},
-#         )
-#     r.raise_for_status()
-#     data = r.json()
-#     return data["choices"][0]["message"]["content"]
+    Args:
+        calories (float or int): Total calories to burn.
+        weight_kg (float or int): Weight of the person in kilograms.
 
-# def parse_json_loose(s: str) -> Dict[str, Any]:
-#     s = s.strip()
-#     if s.startswith("```"):
-#         s = s.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-#     return json.loads(s)
-
-# # ---------- tools ----------
-# @mcp.tool(
-#     name="calculate_bmi_and_category",
-#     description="Compute BMI and WHO category from weight (kg) and height (cm).",
-#     schema={
-#         "type": "object",
-#         "properties": {
-#             "weight_kg": {"type": "number", "minimum": 1},
-#             "height_cm": {"type": "number", "minimum": 1},
-#         },
-#         "required": ["weight_kg", "height_cm"],
-#         "additionalProperties": False,
-#     },
-# )
-# async def calculate_bmi_and_category(weight_kg: float, height_cm: float) -> Dict[str, Any]:
-#     return compute_bmi_category(weight_kg, height_cm)
-
-# @mcp.tool(
-#     name="llm_diet_recommendation",
-#     description="Personalized 1-day diet plan as JSON (calories/macros/meal plan/grocery/cautions), using BMI+BMR+TDEE plus an LLM.",
-#     schema={
-#         "type": "object",
-#         "properties": {
-#             "weight_kg": {"type": "number", "minimum": 1},
-#             "height_cm": {"type": "number", "minimum": 1},
-#             "age": {"type": "integer", "minimum": 10, "maximum": 100},
-#             "sex": {"type": "string", "enum": ["male", "female"]},
-#             "activity_level": {
-#                 "type": "string",
-#                 "enum": ["sedentary", "light", "moderate", "active", "very_active"],
-#             },
-#             "goal": {"type": "string", "enum": ["lose", "maintain", "gain"]},
-#             "dietary_prefs": {"type": "array", "items": {"type": "string"}},
-#             "allergies": {"type": "array", "items": {"type": "string"}},
-#             "model": {"type": "string", "default": "gpt-4o-mini"},
-#             "provider_api_base": {
-#                 "type": "string",
-#                 "default": "https://api.openai.com/v1/chat/completions",
-#             },
-#             "api_key_env": {"type": "string", "default": "OPENAI_API_KEY"},
-#             "temperature": {"type": "number", "default": 0.2},
-#         },
-#         "required": ["weight_kg", "height_cm", "age", "sex", "activity_level", "goal"],
-#         "additionalProperties": False,
-#     },
-# )
-# async def llm_diet_recommendation(
-#     weight_kg: float,
-#     height_cm: float,
-#     age: int,
-#     sex: str,
-#     activity_level: str,
-#     goal: str,
-#     dietary_prefs: Optional[List[str]] = None,
-#     allergies: Optional[List[str]] = None,
-#     model: str = "gpt-4o-mini",
-#     provider_api_base: str = "https://api.openai.com/v1/chat/completions",
-#     api_key_env: str = "OPENAI_API_KEY",
-#     temperature: float = 0.2,
-# ) -> Dict[str, Any]:
-#     basics = compute_bmi_category(weight_kg, height_cm)
-#     if "error" in basics:
-#         return basics
-
-#     bmr = mifflin_st_jeor(weight_kg, height_cm, age, sex)
-#     tdee = bmr * ACTIVITY.get(activity_level, 1.375)
-
-#     if goal == "lose":
-#         target_cal = max(1200, tdee - 400)
-#         protein_g = round(1.6 * weight_kg)
-#     elif goal == "gain":
-#         target_cal = tdee + 300
-#         protein_g = round(1.8 * weight_kg)
-#     else:
-#         target_cal = tdee
-#         protein_g = round(1.4 * weight_kg)
-
-#     target_cal = int(round(target_cal))
-#     cal_p = int(protein_g * 4)
-#     remaining = max(0, target_cal - cal_p)
-#     carbs_cal = int(remaining * 0.6)
-#     fat_cal = remaining - carbs_cal
-#     carbs_g = round(carbs_cal / 4)
-#     fat_g = round(fat_cal / 9)
-
-#     api_key = os.getenv(api_key_env)
-#     if not api_key:
-#         return {"error": f"{api_key_env} not set in environment."}
-
-#     system_msg = (
-#         "You are a precise nutrition coach. Respond ONLY with valid minified JSON matching the schema."
-#     )
-#     prefs = ", ".join(dietary_prefs or []) or "none"
-#     allergy_str = ", ".join(allergies or []) or "none"
-
-#     schema_block = """
-# {"calories_target": int, "macros": {"protein_g": int, "carbs_g": int, "fat_g": int},
-# "meal_plan": {"breakfast":[{"item":str,"portion":str,"calories":int}],
-# "lunch":[{"item":str,"portion":str,"calories":int}],
-# "snack":[{"item":str,"portion":str,"calories":int}],
-# "dinner":[{"item":str,"portion":str,"calories":int}]},
-# "grocery_list":[str], "cautions":[str], "motivation_tips":[str]}
-# """.strip()
-
-#     user_msg = f"""
-# Return JSON for a 1-day diet plan tailored to:
-
-# Sex:{sex}; Age:{age}; Height_cm:{height_cm}; Weight_kg:{weight_kg};
-# BMI:{basics.get("bmi")}; BMI_Category:{basics.get("category")};
-# Activity_Level:{activity_level}; Goal:{goal};
-# Dietary_Preferences:{prefs}; Allergies:{allergy_str};
-# Target_Calories:{target_cal}
-
-# Schema:
-# {schema_block}
-
-# Constraints:
-# - Respect preferences/allergies.
-# - Meal calories sum within ±10% of calories_target.
-# - Prefer high-fiber carbs, lean proteins; moderate sugar/sodium.
-# - Use commonly available foods in India when possible.
-# """.strip()
-
-#     assistant_hint = json.dumps(
-#         {"suggested_macros_hint": {"protein_g": int(protein_g), "carbs_g": int(carbs_g), "fat_g": int(fat_g)}},
-#         separators=(",", ":"),
-#     )
-
-#     content = await call_llm_chat(
-#         messages=[
-#             {"role": "system", "content": system_msg},
-#             {"role": "assistant", "content": assistant_hint},
-#             {"role": "user", "content": user_msg},
-#         ],
-#         model=model,
-#         api_base=provider_api_base,
-#         api_key=api_key,
-#         temperature=temperature,
-#     )
-
-#     try:
-#         plan = parse_json_loose(content)
-#     except Exception as e:
-#         return {"error": "Model did not return valid JSON.", "details": str(e), "raw": content}
-
-#     plan["_meta"] = {
-#         "bmi": basics["bmi"],
-#         "bmi_category": basics["category"],
-#         "bmr": int(round(bmr)),
-#         "tdee": int(round(tdee)),
-#         "target_calories": target_cal,
-#         "suggested_macros_hint": {"protein_g": int(protein_g), "carbs_g": int(carbs_g), "fat_g": int(fat_g)},
-#     }
-#     return plan
-
-# @mcp.tool(
-#     name="llm_exercise_suggestions",
-#     description="Get a JSON weekly exercise split for a goal (beginner–intermediate).",
-#     schema={
-#         "type": "object",
-#         "properties": {
-#             "goal": {"type": "string"},
-#             "constraints": {"type": "array", "items": {"type": "string"}},
-#             "model": {"type": "string", "default": "gpt-4o-mini"},
-#             "provider_api_base": {
-#                 "type": "string",
-#                 "default": "https://api.openai.com/v1/chat/completions",
-#             },
-#             "api_key_env": {"type": "string", "default": "OPENAI_API_KEY"},
-#         },
-#         "required": ["goal"],
-#         "additionalProperties": False,
-#     },
-# )
-# async def llm_exercise_suggestions(
-#     goal: str,
-#     constraints: Optional[List[str]] = None,
-#     model: str = "gpt-4o-mini",
-#     provider_api_base: str = "https://api.openai.com/v1/chat/completions",
-#     api_key_env: str = "OPENAI_API_KEY",
-# ) -> Dict[str, Any]:
-#     api_key = os.getenv(api_key_env)
-#     if not api_key:
-#         return {"error": f"{api_key_env} not set in environment."}
-
-#     system_msg = "You are a concise fitness coach. Return ONLY valid JSON."
-#     user_msg = f"""
-# Goal: {goal}
-# Constraints: {", ".join(constraints or []) or "none"}
-
-# Schema:
-# {{"weekly_plan": {{"Mon":[{{"exercise":str,"sets":int,"reps_or_time":str}}],
-# "Tue":[{{"exercise":str,"sets":int,"reps_or_time":str}}],"Wed":[{{"exercise":str,"sets":int,"reps_or_time":str}}],
-# "Thu":[{{"exercise":str,"sets":int,"reps_or_time":str}}],"Fri":[{{"exercise":str,"sets":int,"reps_or_time":str}}],
-# "Sat":[{{"exercise":str,"sets":int,"reps_or_time":str}}],"Sun":[{{"exercise":str,"sets":int,"reps_or_time":str}}]}},
-# "notes":[str]}}
-# Keep it realistic for beginner–intermediate with limited equipment if unspecified.
-# """.strip()
-
-#     content = await call_llm_chat(
-#         messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
-#         model=model,
-#         api_base=provider_api_base,
-#         api_key=api_key,
-#         temperature=0.3,
-#     )
-
-#     try:
-#         return parse_json_loose(content)
-#     except Exception as e:
-#         return {"error": "Model did not return valid JSON.", "details": str(e), "raw": content}
+    Returns:
+        dict: A dictionary mapping exercise names (str) to the estimated duration (int, in minutes).
+    """
+    durations = {}
+    for activity, met in EXERCISE_MET.items():
+        cal_per_min = (float(met) * float(weight_kg) * 3.5) / 200
+        minutes_needed = round(calories / cal_per_min)
+        durations[activity] = minutes_needed
+    return durations
 
 
+def fetch_calories(meal_name):
+    """
+    Fetch the approximate calorie count for a given meal using DuckDuckGo Search.
+
+    Args:
+        meal_name (str): Name of the meal or food item to search for.
+
+    Returns:
+        int or None: Estimated calorie value if found, else None.
+    """
+    query = f"{meal_name} calories"
+    with DDGS() as ddgs:
+        results = ddgs.text(query, max_results=3)
+        for result in results:
+            text = result.get("body", "") + " " + result.get("title", "")
+            match = re.search(r"(\d{2,5})\s*(kcal|calories?)", text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+    return None
 
 
-# # --- Tool: job_finder (now smart!) ---
-# JobFinderDescription = RichToolDescription(
-#     description="Smart job tool: analyze descriptions, fetch URLs, or search jobs based on free text.",
-#     use_when="Use this to evaluate job descriptions or search for jobs using freeform goals.",
-#     side_effects="Returns insights, fetched job descriptions, or relevant job links.",
-# )
+@mcp.tool()
+def cheat_meal_assist(meal, weight_kg):
+    """
+    Provide exercise recommendations to burn off the calories from a cheat meal.
 
-# @mcp.tool(description=JobFinderDescription.model_dump_json())
-# async def job_finder(
-#     user_goal: Annotated[str, Field(description="The user's goal (can be a description, intent, or freeform query)")],
-#     job_description: Annotated[str | None, Field(description="Full job description text, if available.")] = None,
-#     job_url: Annotated[AnyUrl | None, Field(description="A URL to fetch a job description from.")] = None,
-#     raw: Annotated[bool, Field(description="Return raw HTML content if True")] = False,
-# ) -> str:
-#     """
-#     Handles multiple job discovery methods: direct description, URL fetch, or freeform search query.
-#     """
-#     if job_description:
-#         return (
-#             f"📝 **Job Description Analysis**\n\n"
-#             f"---\n{job_description.strip()}\n---\n\n"
-#             f"User Goal: **{user_goal}**\n\n"
-#             f"💡 Suggestions:\n- Tailor your resume.\n- Evaluate skill match.\n- Consider applying if relevant."
-#         )
+    Args:
+        meal (str): Name of the cheat meal.
+        weight_kg (float or int): Weight of the person in kilograms.
 
-#     if job_url:
-#         content, _ = await Fetch.fetch_url(str(job_url), Fetch.USER_AGENT, force_raw=raw)
-#         return (
-#             f"🔗 **Fetched Job Posting from URL**: {job_url}\n\n"
-#             f"---\n{content.strip()}\n---\n\n"
-#             f"User Goal: **{user_goal}**"
-#         )
+    Returns:
+        dict: Dictionary with:
+              - 'calories' (int): Estimated calories of the cheat meal.
+              - 'Activity_list_to_burn_calories' (dict): Mapping of activity to duration in minutes.
+    """
+    calories = fetch_calories(meal)
+    if not calories:
+        print("⚠️ Could not find calorie information.")
+        return
 
-#     if "look for" in user_goal.lower() or "find" in user_goal.lower():
-#         links = await Fetch.google_search_links(user_goal)
-#         return (
-#             f"🔍 **Search Results for**: _{user_goal}_\n\n" +
-#             "\n".join(f"- {link}" for link in links)
-#         )
+    print(f"Cheat Meal: {meal}")
+    print(f"🔥 Estimated Calories: {calories} kcal\n")
 
-#     raise McpError(ErrorData(code=INVALID_PARAMS, message="Please provide either a job description, a job URL, or a search query in user_goal."))
+    suggestions = estimate_exercise_durations(calories, weight_kg)
+    print("🏃 To burn it off, you could do:")
+    for activity, minutes in suggestions.items():
+        print(f" - {activity}: {minutes} minutes")
+    return {"calories": calories, "Activity_list_to_burn_calories": suggestions}
+
 
 
 # Image inputs and sending images
